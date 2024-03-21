@@ -1,0 +1,183 @@
+name: Test_Migration8270811/android_test
+on:
+  push:
+  workflow_dispatch:
+concurrency:
+  group: "${{ github.ref }}"
+  cancel-in-progress: true
+jobs:
+  updateContainer:
+    runs-on: ubuntu-latest
+    container:
+      image: docker:stable
+    timeout-minutes: 60
+    services:
+      docker:dind:
+        image: docker:dind
+    steps:
+    - name: Install Git
+      run: apk update && apk add git
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - run: docker login -u gitlab-ci-token -p ${{ github.token }} $CI_REGISTRY
+    - run: docker pull $CI_REGISTRY_IMAGE:${{ github.ref }} || true
+    - run: docker build --cache-from $CI_REGISTRY_IMAGE:${{ github.ref }} -t $CI_REGISTRY_IMAGE:${{ github.ref }} .
+    - run: docker push $CI_REGISTRY_IMAGE:${{ github.ref }}
+  ensureContainer:
+    runs-on: ubuntu-latest
+    container:
+      image: docker:stable
+    timeout-minutes: 60
+    continue-on-error: true
+    services:
+      docker:dind:
+        image: docker:dind
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - run: 'mkdir -p ~/.docker && echo ''{"experimental": "enabled"}'' > ~/.docker/config.json'
+    - run: docker login -u gitlab-ci-token -p ${{ github.token }} $CI_REGISTRY
+    - run: docker manifest inspect $CI_REGISTRY_IMAGE:${{ github.ref }} > /dev/null && exit || true
+    - run: docker login -u gitlab-ci-token -p ${{ github.token }} $CI_REGISTRY
+    - run: docker pull $CI_REGISTRY_IMAGE:${{ github.ref }} || true
+    - run: docker build --cache-from $CI_REGISTRY_IMAGE:${{ github.ref }} -t $CI_REGISTRY_IMAGE:${{ github.ref }} .
+    - run: docker push $CI_REGISTRY_IMAGE:${{ github.ref }}
+  buildDebug:
+    needs:
+    - updateContainer
+    - ensureContainer
+    runs-on: ubuntu-latest
+    container:
+      image: "$CI_REGISTRY_IMAGE:${{ github.ref }}"
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - run: chmod +x gradlew
+    - run: export VERSION_CODE=$((${{ github.workflow }})) && echo $VERSION_CODE
+    - run: export VERSION_SHA=`echo ${CI_COMMIT_SHA:0:8}` && echo $VERSION_SHA
+    - run: bundle exec fastlane buildDebug
+    - uses: actions/upload-artifact@v4.1.0
+      if: success()
+      with:
+        name: "${{ github.job }}"
+        path: app/build/outputs
+  buildRelease:
+    needs:
+    - updateContainer
+    - ensureContainer
+    runs-on: ubuntu-latest
+    container:
+      image: "$CI_REGISTRY_IMAGE:${{ github.ref }}"
+    environment:
+      name: production
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - run: chmod +x gradlew
+    - run: export VERSION_CODE=$((${{ github.workflow }})) && echo $VERSION_CODE
+    - run: export VERSION_SHA=`echo ${CI_COMMIT_SHA:0:8}` && echo $VERSION_SHA
+    - run: bundle exec fastlane buildRelease
+    - uses: actions/upload-artifact@v4.1.0
+      if: success()
+      with:
+        name: "${{ github.job }}"
+        path: app/build/outputs
+  testDebug:
+    needs:
+    - buildDebug
+    - buildRelease
+    runs-on: ubuntu-latest
+    container:
+      image: "$CI_REGISTRY_IMAGE:${{ github.ref }}"
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - uses: actions/download-artifact@v4.1.0
+      with:
+        name: buildDebug
+    - run: chmod +x gradlew
+    - run: bundle exec fastlane test
+  publishInternal:
+    needs: testDebug
+    runs-on: ubuntu-latest
+    container:
+      image: "$CI_REGISTRY_IMAGE:${{ github.ref }}"
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - uses: actions/download-artifact@v4.1.0
+      with:
+        name: buildRelease
+    - run: echo You need to add your google_play_api_key.json file for this to work. Please see project's README.md. && false
+    - run: chmod +x gradlew
+    - run: bundle exec fastlane internal
+    - run: rm -f ~/google_play_api_key.json
+      if: always()
+  promoteAlpha:
+    needs: publishInternal
+    runs-on: ubuntu-latest
+    container:
+      image: "$CI_REGISTRY_IMAGE:${{ github.ref }}"
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - run: echo You need to add your google_play_api_key.json file for this to work. Please see project's README.md. && false
+    - run: chmod +x gradlew
+    - run: bundle exec fastlane promote_internal_to_alpha
+    - run: rm -f ~/google_play_api_key.json
+      if: always()
+  promoteBeta:
+    needs: promoteAlpha
+    runs-on: ubuntu-latest
+    container:
+      image: "$CI_REGISTRY_IMAGE:${{ github.ref }}"
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - run: echo You need to add your google_play_api_key.json file for this to work. Please see project's README.md. && false
+    - run: chmod +x gradlew
+    - run: bundle exec fastlane promote_alpha_to_beta
+    - run: rm -f ~/google_play_api_key.json
+      if: always()
+  promoteProduction:
+    needs: promoteBeta
+    runs-on: ubuntu-latest
+    container:
+      image: "$CI_REGISTRY_IMAGE:${{ github.ref }}"
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4.1.0
+      with:
+        fetch-depth: 20
+        lfs: true
+    - run: echo You need to add your google_play_api_key.json file for this to work. Please see project's README.md. && false
+    - run: chmod +x gradlew
+    - run: bundle exec fastlane promote_beta_to_production
+    - run: rm -f ~/google_play_api_key.json
+      if: always()
